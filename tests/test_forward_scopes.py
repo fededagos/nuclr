@@ -95,3 +95,46 @@ def test_forward_scopes(tmp_path, missing_condition):
     assert emb_type.list_size == 256 and str(emb_type.value_type) == "float"
     meta = json.loads((output / "embeddings_meta.json").read_text())
     assert meta["epoch"] == 3 and meta["ckpt"] == str(ckpt)
+
+
+def test_init_only_forward_is_reproducible_without_checkpoint(
+    synthetic_export, tmp_path
+):
+    import wandb
+
+    results = []
+    for run in range(2):
+        output = tmp_path / f"init_{run}"
+        with initialize_config_dir(
+            config_dir=str(Path("configs").resolve()), version_base="1.2"
+        ):
+            cfg = compose(
+                config_name="forward_allgcl",
+                overrides=[
+                    f"data.data_root={synthetic_export}/processed",
+                    f"data.splits_file={synthetic_export}/splits.json",
+                    f"data.units_file={synthetic_export}/units.parquet",
+                    f"output_dir={output}",
+                    "init_only=true",
+                    "seed=42",
+                    "device=cpu",
+                    "precision=fp32",
+                    "num_workers=0",
+                    "model.t_layers=0",
+                    "model.st_layers=0",
+                ],
+            )
+        runner = ForwardPass(cfg, rank=0, world_size=1)
+        runner.train()
+        wandb.finish()
+        assert cfg.ckpt.load_from is None
+        assert not list(output.rglob("*.pt"))
+        meta = json.loads((output / "embeddings_meta.json").read_text())
+        assert meta["init_only"] is True and meta["seed"] == 42
+        assert meta["ckpt"] is None and meta["epoch"] is None
+        assert meta["model_config"]["ctx_duration"] == 32.768
+        frame = pd.read_parquet(output / "embeddings.parquet").sort_values(
+            ["unit_id", "scope"]
+        )
+        results.append(np.stack(frame.emb))
+    np.testing.assert_array_equal(results[0], results[1])

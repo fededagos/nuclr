@@ -34,7 +34,10 @@ class ForwardPass(Trainer):
     """
 
     def setup(self, ckpt: Optional[CheckpointDict]):
-        if ckpt is None:
+        self.init_only = bool(self.cfg.get("init_only", False))
+        if self.init_only and ckpt is not None:
+            raise ValueError("init_only must not load a checkpoint")
+        if ckpt is None and not self.init_only:
             raise ValueError("Must provide ckpt")
 
         self.scoped = bool(self.cfg.get("scopes"))
@@ -45,9 +48,9 @@ class ForwardPass(Trainer):
             if unknown:
                 raise ValueError(f"Unknown scopes: {unknown}")
             self._setup_model(ckpt)
-            self.forward_epoch = ckpt["epoch"]
+            self.forward_epoch = None if self.init_only else ckpt["epoch"]
             self.model_config = OmegaConf.to_container(
-                ckpt["cfg"]["model"], resolve=True
+                self.cfg.model if self.init_only else ckpt["cfg"]["model"], resolve=True
             )
             self.dataset = Dataset(
                 root=self.cfg.data_root,
@@ -57,6 +60,8 @@ class ForwardPass(Trainer):
             )
             return
 
+        if self.init_only:
+            raise ValueError("init_only requires scoped forward")
         embs_dir = expand_path(self.cfg.embs_root) / ckpt["run_id"]
         embs_dir.mkdir(exist_ok=True, parents=True)
         self.embs_save_filepath: Path = (
@@ -80,11 +85,14 @@ class ForwardPass(Trainer):
 
     def _setup_model(self, ckpt):
         self.precision = Precision(self.cfg.precision)
-        self.model: BaseNeuronEncoder = instantiate(
-            ckpt["cfg"]["model"],
-            precision=self.precision,
-        )
-        self.model.load_state_dict(ckpt["model_state_dict"])
+        if ckpt is None:
+            self.cfg.model.ctx_duration = self.cfg.data.ctx_duration
+            model_cfg = self.cfg.model
+        else:
+            model_cfg = ckpt["cfg"]["model"]
+        self.model: BaseNeuronEncoder = instantiate(model_cfg, precision=self.precision)
+        if ckpt is not None:
+            self.model.load_state_dict(ckpt["model_state_dict"])
         self.model = self.model.eval().to(self.device)
 
     def train(self):
@@ -277,7 +285,11 @@ class ForwardPass(Trainer):
                     )
         temporary.replace(output / "embeddings.parquet")
         metadata = {
-            "ckpt": str(Path(self.cfg.ckpt.load_from).resolve()),
+            "ckpt": (
+                None if self.init_only else str(Path(self.cfg.ckpt.load_from).resolve())
+            ),
+            "init_only": self.init_only,
+            "seed": self.cfg.seed,
             "epoch": self.forward_epoch,
             "config": OmegaConf.to_container(self.cfg, resolve=True),
             "model_config": self.model_config,
