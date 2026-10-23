@@ -46,26 +46,58 @@ class TwoViewDataset(Dataset):
         samples = self.common_transform(samples)
         return samples
 
+    def get_sampling_intervals(self):
+        """Keep block boundaries even when adjacent blocks share a domain."""
+        domains = super().get_sampling_intervals()
+        for rec, domain in domains.items():
+            data = self._get_data_object(rec)
+            if not hasattr(data, "blocks"):
+                continue  # Original Bugeon files have only domain intervals.
+            starts, ends = [], []
+            for start, end in zip(data.blocks.start, data.blocks.end):
+                part = domain & Interval(float(start), float(end))
+                starts.extend(part.start)
+                ends.extend(part.end)
+            domains[rec] = Interval(np.array(starts), np.array(ends))
+        return domains
+
     def set_second_view_props(
         self,
         window_length: float,
         max_time_diff: float,
         seed: int,
+        pairing: Optional[dict] = None,
     ):
+        self.pairing_mode = (pairing or {}).get("mode", "local")
+        if self.pairing_mode not in {"recording", "local", "within_condition"}:
+            raise ValueError(f"Unknown pairing mode: {self.pairing_mode}")
         self.window_length = window_length
-        self.max_time_diff = max_time_diff
+        self.max_time_diff = (pairing or {}).get("max_distance", max_time_diff)
         self.sanitized_sampling_intervals = self.get_sampling_intervals()
         self.init_seed = seed
         self.np_rng = np.random.default_rng(seed)
-        self._sanitize_intervals(self.sanitized_sampling_intervals, 2 * window_length)
+        self._sanitize_intervals(self.sanitized_sampling_intervals, window_length)
 
     def _get_second_view(self, v: DatasetIndex):
-        if self.max_time_diff == 0.0:
-            return v
-
-        # 1. construct interval from which to sample
+        # Validate view 1 as well as view 2: neither may cross a block boundary.
         samp_interval = self.sanitized_sampling_intervals[v.recording_id]
-        if self.max_time_diff is not None:
+        inside = ((samp_interval.start <= v.start + 1e-8)
+                  & (samp_interval.end >= v.end - 1e-8))
+        if inside.sum() != 1:
+            raise ValueError("View 1 must be inside exactly one valid block")
+        if self.pairing_mode == "local" and self.max_time_diff == 0.0:
+            return v
+        if self.pairing_mode == "within_condition":
+            blocks = self._get_data_object(v.recording_id).blocks
+            first = (blocks.start <= v.start + 1e-8) & (blocks.end >= v.end - 1e-8)
+            if first.sum() != 1:
+                raise ValueError("View 1 must be inside exactly one block")
+            same = blocks.condition == blocks.condition[first][0]
+            allowed = np.array([np.any((blocks.start[same] <= a + 1e-8)
+                                       & (blocks.end[same] >= b - 1e-8))
+                                for a, b in zip(samp_interval.start, samp_interval.end)])
+            samp_interval = Interval(samp_interval.start[allowed], samp_interval.end[allowed])
+        if self.pairing_mode == "local" and self.max_time_diff is not None:
             samp_interval &= Interval(
                 start=v.start - self.max_time_diff,
                 end=v.end + self.max_time_diff,
