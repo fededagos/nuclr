@@ -138,3 +138,32 @@ def test_init_only_forward_is_reproducible_without_checkpoint(
         )
         results.append(np.stack(frame.emb))
     np.testing.assert_array_equal(results[0], results[1])
+
+
+@pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None])
+def test_init_only_rejects_non_boolean(synthetic_export, tmp_path, invalid):
+    import wandb
+
+    with initialize_config_dir(
+        config_dir=str(Path("configs").resolve()), version_base="1.2"
+    ):
+        cfg = compose(
+            config_name="forward_allgcl",
+            overrides=[
+                f"data.data_root={synthetic_export}/processed",
+                f"data.splits_file={synthetic_export}/splits.json",
+                f"data.units_file={synthetic_export}/units.parquet",
+                f"output_dir={tmp_path}/invalid",
+                "device=cpu",
+                "precision=fp32",
+                "num_workers=0",
+                "model.t_layers=0",
+                "model.st_layers=0",
+            ],
+        )
+    cfg.init_only = invalid
+    try:
+        with pytest.raises(TypeError, match="init_only.*bool"):
+            ForwardPass(cfg, rank=0, world_size=1)
+    finally:
+        wandb.finish()

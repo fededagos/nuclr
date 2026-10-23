@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, Callable, Any
+import hashlib
 import numpy as np
 import torch
 
@@ -77,6 +78,7 @@ class TwoViewDataset(Dataset):
         max_time_diff: float,
         seed: int,
         pairing: Optional[dict] = None,
+        deterministic: bool = False,
     ):
         self.pairing_mode = (pairing or {}).get("mode", "local")
         if self.pairing_mode not in {"recording", "local", "within_condition"}:
@@ -85,6 +87,7 @@ class TwoViewDataset(Dataset):
         self.max_time_diff = (pairing or {}).get("max_distance", max_time_diff)
         self.sanitized_sampling_intervals = self.get_sampling_intervals()
         self.init_seed = seed
+        self.deterministic_pairing = deterministic
         self.np_rng = np.random.default_rng(seed)
         self._sanitize_intervals(self.sanitized_sampling_intervals, window_length)
 
@@ -122,11 +125,23 @@ class TwoViewDataset(Dataset):
                 end=v.end + self.max_time_diff,
             )
 
+        # Validation pairs depend only on the seed and window, never worker/epoch state.
+        rng = self.np_rng
+        if self.deterministic_pairing:
+            key = (
+                f"{self.init_seed}:{v.recording_id}:"
+                f"{float(v.start).hex()}:{float(v.end).hex()}"
+            ).encode()
+            seed = int.from_bytes(
+                hashlib.blake2b(key, digest_size=16).digest(), "little"
+            )
+            rng = np.random.default_rng(seed)
+
         # 2. sample and check
         v2_interval = self._sample_window_from_interval(
             interval=samp_interval,
             window_length=self.window_length,
-            rng=self.np_rng,
+            rng=rng,
         )
         if v2_interval is None:
             return None

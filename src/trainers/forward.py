@@ -31,10 +31,15 @@ class ForwardPass(Trainer):
     """Export neuron embeddings, with split and block scopes for All-GCL.
 
     Existing configs retain the original train-dataset .pt output path.
+    Scoped exports use floor(block_len / ctx_duration) complete, non-overlapping
+    windows from each block's start. Block tails shorter than a full window are
+    not embedded; full windows themselves are never shortened.
     """
 
     def setup(self, ckpt: Optional[CheckpointDict]):
-        self.init_only = bool(self.cfg.get("init_only", False))
+        self.init_only = self.cfg.get("init_only", False)
+        if not isinstance(self.init_only, bool):
+            raise TypeError("init_only must be a bool")
         if self.init_only and ckpt is not None:
             raise ValueError("init_only must not load a checkpoint")
         if ckpt is None and not self.init_only:

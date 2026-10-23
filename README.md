@@ -67,6 +67,36 @@ want to compute embeddings for all neurons here.
 
 Once you have the embeddings, you can follow the instructions in `eval_scripts/README.md` to run our evaluation scipts.
 
+### All-GCL calcium path
+
+`train_allgcl` uses the split lists in `splits.json`, 7.8125 Hz, 32.768 s contexts
+(256 frames), and patch size 8. Its validation view pairs are fixed by the seed
+and window index, independently of epoch, worker state and resume. `best.json`
+selects validation contrastive loss and stores a path relative to `output_dir`,
+for example `ckpt/epoch_3.pt`; consumers resolve it against their train-output
+mount. All-GCL retains the latest complete checkpoint and the best checkpoint.
+Both contain the state needed to resume, and best metadata is recovered from the
+latest checkpoint if publication was interrupted.
+
+`forward_allgcl` exports pre-projector window means for all requested splits and
+all/condition/stimulus scopes. Within each block it uses
+`floor(block_len / ctx_duration)` non-overlapping windows from the block start.
+The remaining block tail is not embedded; no full window is silently shortened.
+A unit with a non-finite normalized trace is omitted from that view's window.
+A unit/scope with no finite windows has no row. `n_windows` counts the windows
+actually contributing to each unit/scope mean.
+
+`init_only: true` exports a randomly initialized model without loading a
+checkpoint. This option accepts a boolean only. Supply the same model config and
+seed as the trained run for a comparable baseline; metadata records both, plus
+`init_only`, checkpoint and epoch (null for the baseline).
+
+The shipped Bugeon configuration retains its legacy 30 s context, implicit time
+base and 32 × 4 layout. It warns when an extra trailing frame is dropped. The
+shared calcium UnitDropout fix also applies to Bugeon, and valid sampling
+intervals now need one context window rather than two; these affect exact paper
+reruns even though the legacy time-base behavior is retained.
+
 ## Citation
 
 If you find this repository useful in your research, please consider giving a star ⭐ and a citation

@@ -352,6 +352,7 @@ class ContrastiveTrainer(Trainer):
                 max_time_diff=self.cfg.views.max_distance,
                 seed=self.cfg.seed,
                 pairing=self.cfg.data.get("pairing"),
+                deterministic=True,
             )
             collate_fn = TwoViewData.collate
 

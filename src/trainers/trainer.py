@@ -93,8 +93,9 @@ class Trainer(ABC):
                     self.best_record = {
                         "epoch": self.epoch,
                         "val_loss": val_loss,
-                        "ckpt": str(
-                            (self.ckpt_dir / f"epoch_{self.epoch}.pt").resolve()
+                        "ckpt": os.path.relpath(
+                            self.ckpt_dir / f"epoch_{self.epoch}.pt",
+                            self.cfg.output_dir,
                         ),
                     }
                 self.add_checkpoint_items(
@@ -104,6 +105,8 @@ class Trainer(ABC):
             self._save_checkpoint(force=improved)
             if improved:
                 self._write_best_json()
+            # Publish checkpoint and best metadata before deleting superseded state.
+            self._prune_checkpoints()
             limit = self.cfg.get("max_steps") or self.cfg.get("target_steps")
             if limit is not None and self.train_step >= limit:
                 break
@@ -178,11 +181,33 @@ class Trainer(ABC):
 
         # Recover publication if interrupted between checkpoint and JSON replacement.
         self._write_best_json()
+        self._prune_checkpoints()
+
+    @rank_zero_only
+    def _prune_checkpoints(self):
+        """All-GCL keeps the latest full resume state and the selected best model."""
+        if not self.cfg.get("output_dir") or self.ckpt_dir is None:
+            return
+        checkpoints = [
+            p for p in self.ckpt_dir.glob("epoch_*.pt") if p.stem[6:].isdigit()
+        ]
+        if not checkpoints:
+            return
+        keep = {max(checkpoints, key=lambda p: int(p.stem[6:]))}
+        if getattr(self, "best_record", None):
+            keep.add(self.ckpt_dir / Path(self.best_record["ckpt"]).name)
+        for checkpoint in checkpoints:
+            if checkpoint not in keep:
+                checkpoint.unlink()
 
     @rank_zero_only
     def _write_best_json(self):
         if not self.cfg.get("output_dir") or not getattr(self, "best_record", None):
             return
+        # Also migrate older absolute records when a run is resumed or relocated.
+        self.best_record["ckpt"] = os.path.relpath(
+            self.ckpt_dir / f"epoch_{self.best_record['epoch']}.pt", self.cfg.output_dir
+        )
         best_path = Path(self.cfg.output_dir) / "best.json"
         temporary = best_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(self.best_record))
