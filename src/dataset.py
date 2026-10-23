@@ -18,6 +18,16 @@ SamplingIntervals = Dict[str, Interval]
 logger = get_cli_logger()
 
 
+def get_window(dataset, index):
+    """Read a half-open window with stable floating-point boundary comparisons.
+
+    Sampler additions can put a boundary a few ulps above a frame timestamp.
+    A 1 ns left shift keeps the first frame and excludes the right endpoint;
+    it does not crop or pad the resulting samples.
+    """
+    return dataset.get(index.recording_id, index.start - 1e-9, index.end - 1e-9)
+
+
 class TwoViewDataset(Dataset):
     r"""A dataset class that extends TBDataset to support sampling more than 1 data slice.
 
@@ -32,7 +42,7 @@ class TwoViewDataset(Dataset):
     common_transform: Callable[[List[ViewData]], TwoViewData]
 
     def _get_one_item(self, index: DatasetIndex) -> ViewData:
-        sample = self.get(index.recording_id, index.start, index.end)
+        sample = get_window(self, index)
         if self.transform is not None:
             sample = self.transform(sample)
         return sample  # type: ignore
@@ -81,8 +91,9 @@ class TwoViewDataset(Dataset):
     def _get_second_view(self, v: DatasetIndex):
         # Validate view 1 as well as view 2: neither may cross a block boundary.
         samp_interval = self.sanitized_sampling_intervals[v.recording_id]
-        inside = ((samp_interval.start <= v.start + 1e-8)
-                  & (samp_interval.end >= v.end - 1e-8))
+        inside = (samp_interval.start <= v.start + 1e-8) & (
+            samp_interval.end >= v.end - 1e-8
+        )
         if inside.sum() != 1:
             raise ValueError("View 1 must be inside exactly one valid block")
         if self.pairing_mode == "local" and self.max_time_diff == 0.0:
@@ -93,10 +104,18 @@ class TwoViewDataset(Dataset):
             if first.sum() != 1:
                 raise ValueError("View 1 must be inside exactly one block")
             same = blocks.condition == blocks.condition[first][0]
-            allowed = np.array([np.any((blocks.start[same] <= a + 1e-8)
-                                       & (blocks.end[same] >= b - 1e-8))
-                                for a, b in zip(samp_interval.start, samp_interval.end)])
-            samp_interval = Interval(samp_interval.start[allowed], samp_interval.end[allowed])
+            allowed = np.array(
+                [
+                    np.any(
+                        (blocks.start[same] <= a + 1e-8)
+                        & (blocks.end[same] >= b - 1e-8)
+                    )
+                    for a, b in zip(samp_interval.start, samp_interval.end)
+                ]
+            )
+            samp_interval = Interval(
+                samp_interval.start[allowed], samp_interval.end[allowed]
+            )
         if self.pairing_mode == "local" and self.max_time_diff is not None:
             samp_interval &= Interval(
                 start=v.start - self.max_time_diff,
@@ -133,11 +152,16 @@ class TwoViewDataset(Dataset):
 
         # 1. Measure duration from which "start" time can be sampled from each period
         start_sample_durs: np.ndarray = interval.end - interval.start - window_length  # type: ignore
-        start_sample_durs = start_sample_durs.clip(0)
-        if not (start_sample_durs > 0).any():
-            return None
+        if not (start_sample_durs > 1e-8).any():
+            exact = np.flatnonzero(np.abs(start_sample_durs) <= 1e-8)
+            if not len(exact):
+                return None
+            period_idx = rng.choice(exact)
+            start = interval.start[period_idx]
+            return Interval(start, start + window_length)
 
-        # 2. Choose which period to sample from
+        # 2. Choose uniformly over all admissible window start times.
+        start_sample_durs = start_sample_durs.clip(0)
         probs = start_sample_durs / sum(start_sample_durs)
         period_idx = rng.choice(len(interval), p=probs)
         period_start, period_end = interval.start[period_idx], interval.end[period_idx]  # type: ignore

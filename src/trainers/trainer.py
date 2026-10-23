@@ -1,4 +1,6 @@
 import os
+import json
+import time
 from pathlib import Path
 from abc import ABC, abstractmethod
 from functools import cached_property
@@ -18,11 +20,13 @@ from src.utils import (
     expand_path,
 )
 from src.logger import Logger, EPOCH_PBAR_FMT
+from src.allgcl import prepare_allgcl_config
 from src.checkpoint import save_ckpt, CheckpointDict
 
 
 class Trainer(ABC):
     def __init__(self, cfg: DictConfig, rank: int, world_size: int):
+        prepare_allgcl_config(cfg)
         seed_everything(cfg.seed)
         setup_ddp(rank, world_size, cfg.ddp)
 
@@ -30,7 +34,12 @@ class Trainer(ABC):
         self.rank = rank
         self.world_size = world_size
         self.is_distributed = dist.is_initialized()
-        self.device = torch.device(rank)
+        requested_device = cfg.get("device", "auto")
+        self.device = torch.device(
+            "cpu"
+            if requested_device == "cpu" or not torch.cuda.is_available()
+            else f"cuda:{rank}"
+        )
         self.train_step = 0
         self.epoch = 0
         self.to_ckpt = {}
@@ -44,7 +53,7 @@ class Trainer(ABC):
 
         self._setup_logger()
 
-        if "CKPT_DIR" in os.environ:
+        if "CKPT_DIR" in os.environ and not self.cfg.get("output_dir"):
             self.cfg.ckpt.dir = os.environ["CKPT_DIR"]
             self.logger.info(f"Overriding ckpt.dir to {self.cfg.ckpt.dir}")
 
@@ -67,12 +76,44 @@ class Trainer(ABC):
         ):
             self.epoch = epoch
             self.barrier()
+            self.epoch_started = time.perf_counter()
             self.train_epoch()
-            self._save_checkpoint()
             if (self.epoch % self.cfg.val.every_n_epochs == 0) or (  # if user asked
                 self.epoch == self.cfg.num_epochs - 1  # if last epoch
             ):
                 self.val_epoch()
+            val_loss = getattr(self, "last_val_loss", None)
+            improved = val_loss is not None and val_loss < getattr(
+                self, "best_val_loss", float("inf")
+            )
+            if improved:
+                self.best_val_loss = val_loss
+            if self.cfg.get("output_dir"):
+                self.add_checkpoint_items(
+                    best_val_loss=getattr(self, "best_val_loss", float("inf"))
+                )
+            self._save_checkpoint()
+            if (
+                improved
+                and self.rank == 0
+                and self.ckpt_dir is not None
+                and self.cfg.get("output_dir")
+            ):
+                best_path = Path(self.cfg.output_dir) / "best.json"
+                temporary = best_path.with_suffix(".json.tmp")
+                temporary.write_text(
+                    json.dumps(
+                        {
+                            "epoch": self.epoch,
+                            "val_loss": val_loss,
+                            "ckpt": str(self.last_ckpt_path.resolve()),
+                        }
+                    )
+                )
+                temporary.replace(best_path)
+            limit = self.cfg.get("max_steps") or self.cfg.get("target_steps")
+            if limit is not None and self.train_step >= limit:
+                break
 
     def train_epoch(self): ...
 
@@ -109,7 +150,9 @@ class Trainer(ABC):
             return
 
         # Create checkpoint directory
-        self.ckpt_dir = expand_path(self.cfg.ckpt.dir) / self.logger.run_id
+        self.ckpt_dir = expand_path(self.cfg.ckpt.dir)
+        if not self.cfg.get("output_dir"):
+            self.ckpt_dir /= self.logger.run_id
         self.ckpt_dir.mkdir(exist_ok=True, parents=True)
         self.logger.info(f"Checkpoint directory: {self.ckpt_dir}")
 

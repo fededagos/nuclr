@@ -1,0 +1,81 @@
+defaults:
+  - data: allgcl
+  - model: nuclr_v2ga_ca2
+  - loss: sw_dcl
+  - optim: adamw
+  - trainer: contrastive
+  - train_transform: unit_dropout
+  - _self_
+
+data_root: ${data.data_root}
+output_dir: ./output
+resume: auto
+device: auto
+target_steps: 50000
+max_steps: null
+
+views:
+  duration: ${data.ctx_duration}  # in seconds
+  max_distance: ${data.pairing.max_distance}  # in seconds
+
+seed: 42
+num_workers: 7  # scaled with num_gpus
+
+precision: bf16
+num_epochs: null
+batch_size: 16  # total value (across all GPUs)
+
+val:
+  first: false  # do val before train (for debug)
+  every_n_epochs: 1
+  loss: true  # compute val loss
+
+lr:
+  rise: 1  # num of epochs to rise for (could be float to indicate ratio of epochs)
+  decay: 1 # epoch num at which to start decaying (could be float to indicate ratio of epochs)
+  max: 0.000125
+
+grad_clip:
+  enable: true
+  max_norm: 1.0
+
+ckpt:
+  enable: true
+  dir: ${output_dir}/ckpt/
+  every_n_epochs: 1
+  load_from: null
+  resume: false
+  model_only: false
+
+wandb:
+  mode: offline  # options: online / offline / disabled
+  entity: null
+  project: nuGCL
+  name: null
+  dir: ${output_dir}/wandb
+  resume: allow
+  id: null  # set to wandb id if resuming
+
+ddp:
+  force: false
+  master_addr: localhost
+  master_port: null
+
+debug: null  # options: "train", "tokenizer"
+
+log_weights: false
+log_grads: false
+
+
+model:
+  sampling_rate: 7.8125
+  patch_size: 8
+
+optim:
+  lr: ${lr.max}
+
+hydra:
+  run:
+    dir: ${output_dir}/hydra
+  job:
+    chdir: false

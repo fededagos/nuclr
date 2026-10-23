@@ -49,15 +49,26 @@ class NuclrV2gaCa2(BaseNeuronEncoder):
         if patch_size <= 0:
             raise ValueError("patch_size must be positive")
         if sampling_rate is None:
-            warnings.warn("Legacy Bugeon time base: set sampling_rate and an exact window explicitly", stacklevel=2)
+            warnings.warn(
+                "Legacy Bugeon time base: set sampling_rate and an exact window explicitly",
+                stacklevel=2,
+            )
             num_samples = math.floor(self.ctx_duration / 0.23344201114422702)
             self.num_latents = num_samples // self.patch_size
         else:
             num_samples = round(ctx_duration * sampling_rate)
-            if (sampling_rate <= 0 or patch_size <= 0 or num_samples <= 0
-                    or not math.isclose(ctx_duration * sampling_rate, num_samples, abs_tol=1e-6)
-                    or num_samples % patch_size):
-                raise ValueError("Window must contain an exact positive multiple of patch_size samples")
+            if (
+                sampling_rate <= 0
+                or patch_size <= 0
+                or num_samples <= 0
+                or not math.isclose(
+                    ctx_duration * sampling_rate, num_samples, abs_tol=1e-6
+                )
+                or num_samples % patch_size
+            ):
+                raise ValueError(
+                    "Window must contain an exact positive multiple of patch_size samples"
+                )
             self.num_latents = num_samples // patch_size
 
         logger.info(f"Num latents = {self.num_latents}, Patch size = {patch_size}")
@@ -166,10 +177,18 @@ class NuclrV2gaCa2(BaseNeuronEncoder):
         assert values.size(0) == num_units
         expected = self.num_latents * self.patch_size
         if values.size(1) != expected:
-            if self.sampling_rate is None and expected < values.size(1) < expected + self.patch_size:
-                warnings.warn(f"Legacy Bugeon window drops {values.size(1) - expected} trailing samples", stacklevel=2)
+            if (
+                self.sampling_rate is None
+                and expected < values.size(1) < expected + self.patch_size
+            ):
+                warnings.warn(
+                    f"Legacy Bugeon window drops {values.size(1) - expected} trailing samples",
+                    stacklevel=2,
+                )
             else:
-                raise ValueError(f"Expected {expected} samples, received {values.size(1)}")
+                raise ValueError(
+                    f"Expected {expected} samples, received {values.size(1)}"
+                )
         values = values[:, :expected]
         values = rearrange(
             values, "U (L P) -> (U L) P", L=self.num_latents, P=self.patch_size

@@ -1,4 +1,7 @@
 from collections import defaultdict
+import math
+import time
+from contextlib import nullcontext
 from typing import Optional
 
 import numpy as np
@@ -40,7 +43,28 @@ class ContrastiveTrainer(Trainer):
         self._setup_evaluator()
 
         self._setup_optimizer()
+        if self.cfg.get("target_steps") is not None:
+            total = self.steps_per_epoch * self.cfg.num_epochs
+            warmup = max(1, self.steps_per_epoch)
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer,
+                lambda step: (
+                    step / warmup
+                    if step < warmup
+                    else 0.5
+                    * (
+                        1
+                        + math.cos(
+                            math.pi * min(1.0, (step - warmup) / max(1, total - warmup))
+                        )
+                    )
+                ),
+            )
+            self.add_checkpoint_items(scheduler=self.scheduler)
         self._apply_ckpt(ckpt)
+        self.best_val_loss = (
+            ckpt.get("best_val_loss", float("inf")) if ckpt else float("inf")
+        )
         self.model = self.make_ddp(self.model)  # type: ignore
         self.loss = self.make_ddp(self.loss)  # type: ignore
 
@@ -51,12 +75,15 @@ class ContrastiveTrainer(Trainer):
         self.train_loader.sampler.set_epoch(self.epoch)  # pyright: ignore
 
         for batch in self.logger.get_pbar(self.train_loader, "Train"):
+            limit = self.cfg.get("max_steps") or self.cfg.get("target_steps")
+            if limit is not None and self.train_step >= limit:
+                break
             self.lr_step()
 
             batch: TwoViewData
             batch.to(self.device)
 
-            with torch.autocast(device_type="cuda", dtype=self.precision.dtype):
+            with self.autocast():
                 y1 = self.model(**batch.view1.data["enc_input"])
                 y2 = self.model(**batch.view2.data["enc_input"])
 
@@ -81,6 +108,8 @@ class ContrastiveTrainer(Trainer):
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
                     torch.nn.utils.clip_grad_norm_(self.loss.parameters(), max_norm)
                 self.optimizer.step()
+                if hasattr(self, "scheduler"):
+                    self.scheduler.step()
 
             validate_weights(self.model)
             validate_weights(self.loss)
@@ -91,8 +120,17 @@ class ContrastiveTrainer(Trainer):
 
             self.train_step += 1
 
+    def autocast(self):
+        return (
+            torch.autocast(device_type="cuda", dtype=self.precision.dtype)
+            if self.device.type == "cuda" and self.precision.dtype != torch.float32
+            else nullcontext()
+        )
+
     def lr_step(self):
         """Currently only implements linear-rise, cosine decay schedule"""
+        if hasattr(self, "scheduler"):
+            return
         lr = self.cfg.lr.max
 
         if self.cfg.lr.rise is not None:
@@ -120,6 +158,7 @@ class ContrastiveTrainer(Trainer):
         if self.cfg.debug == "train":
             return
 
+        self.last_val_loss = None
         self.model.eval()
         self.loss.eval()
         self.val_emb_collector.reset()
@@ -129,7 +168,7 @@ class ContrastiveTrainer(Trainer):
                 assert isinstance(batch, ViewData)
                 batch.to(self.device)
 
-                with torch.autocast(device_type="cuda", dtype=self.precision.dtype):
+                with self.autocast():
                     y1 = self.model(**batch.data["enc_input"])
                     self.val_emb_collector.update(y1, batch.unit_ids)
 
@@ -140,7 +179,7 @@ class ContrastiveTrainer(Trainer):
                 assert isinstance(batch, TwoViewData)
                 batch.to(self.device)
 
-                with torch.autocast(device_type="cuda", dtype=self.precision.dtype):
+                with self.autocast():
                     y1 = self.model(**batch.view1.data["enc_input"])
                     y2 = self.model(**batch.view2.data["enc_input"])
                     self.val_emb_collector.update(y1, batch.view1.unit_ids)
@@ -161,6 +200,7 @@ class ContrastiveTrainer(Trainer):
             for k, v in running_loss_dict.items():
                 running_loss_dict[k] /= steps
             self.logger.log_dict(running_loss_dict)
+            self.last_val_loss = float(running_loss_dict["val/loss"])
 
         self._run_evaluator()
         self.push_logs()
@@ -221,6 +261,8 @@ class ContrastiveTrainer(Trainer):
         if self.cfg.ckpt.resume:
             self.loss.load_state_dict(ckpt["loss_state_dict"])
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if hasattr(self, "scheduler"):
+                self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         elif self.cfg.ckpt.model_only:
             self.loss.load_state_dict(ckpt["loss_state_dict"])
 
@@ -241,6 +283,7 @@ class ContrastiveTrainer(Trainer):
             window_length=self.cfg.views.duration,
             max_time_diff=self.cfg.views.max_distance,
             seed=self.cfg.seed,
+            pairing=self.cfg.data.get("pairing"),
         )
 
         sampler = DistributedSamplerWrapper(
@@ -264,6 +307,17 @@ class ContrastiveTrainer(Trainer):
         )
 
         self.steps_per_epoch = len(self.train_loader)
+        if self.steps_per_epoch == 0:
+            raise ValueError(
+                "Training selection has no complete batch; reduce batch_size"
+            )
+        if self.cfg.get("target_steps") is not None:
+            self.cfg.num_epochs = math.ceil(
+                self.cfg.target_steps / self.steps_per_epoch
+            )
+            self.logger.info(
+                f"Training {self.cfg.num_epochs} epochs, {self.steps_per_epoch} steps/epoch, target {self.cfg.target_steps} steps"
+            )
 
         self.logger.info(f"Train sessions: {len(self.train_session_ids)}")
         self.logger.info(f"Train units: {len(self.train_unit_ids)}")
@@ -295,6 +349,7 @@ class ContrastiveTrainer(Trainer):
                 window_length=self.cfg.views.duration,
                 max_time_diff=self.cfg.views.max_distance,
                 seed=self.cfg.seed,
+                pairing=self.cfg.data.get("pairing"),
             )
             collate_fn = TwoViewData.collate
 
@@ -341,7 +396,8 @@ class ContrastiveTrainer(Trainer):
 
     @rank_zero_only
     def _setup_evaluator(self):
-        if self.cfg.debug is not None:
+        if self.cfg.debug is not None or self.cfg.data.evaluator is None:
+            self.evaluator = None
             return
 
         self.evaluator = instantiate(
@@ -358,7 +414,11 @@ class ContrastiveTrainer(Trainer):
 
         train_unit_embs, train_unit_ids = self.train_emb_collector.compute()
         val_unit_embs, val_unit_ids = self.val_emb_collector.compute()
-        if self.rank == 0:
+        if self.rank == 0 and self.evaluator is not None:
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            started = time.perf_counter()
+            compute_seconds = started - getattr(self, "epoch_started", started)
             metrics = self.evaluator(
                 X_train=train_unit_embs,
                 train_unit_ids=train_unit_ids,
@@ -366,3 +426,11 @@ class ContrastiveTrainer(Trainer):
                 val_unit_ids=val_unit_ids,
             )
             self.logger.log_dict(metrics)
+            if self.cfg.data.get("brainset") == "euler_allgcl_2025":
+                seconds = time.perf_counter() - started
+                fraction = seconds / max(compute_seconds, 1e-9)
+                self.logger.log("monitor/seconds", seconds)
+                self.logger.log("monitor/epoch_fraction", fraction)
+                self.logger.info(
+                    f"Evaluator: {seconds:.4f}s / {compute_seconds:.4f}s ({fraction:.2%})"
+                )

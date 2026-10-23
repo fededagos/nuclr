@@ -133,6 +133,7 @@ class RandomTwoViewSampler(torch.utils.data.Sampler):
 
     def set_epoch(self, epoch: int):
         self.np_rng = np.random.default_rng(self.init_seed + epoch)
+        self._indices_cache = None
 
     def __len__(self) -> int:
         self._prepare_indices_cache()
@@ -207,6 +208,7 @@ class DistributedSamplerWrapper(torch.utils.data.Sampler):
 
     def set_epoch(self, epoch: int):
         """Pass the epoch to the underlying sampler if it supports it."""
+        self._indices_cache = None
         if hasattr(self.sampler, "set_epoch"):
             self.sampler.set_epoch(epoch)
 
@@ -241,6 +243,7 @@ class RandomFixedWindowSampler(torch.utils.data.Sampler):
 
     def set_epoch(self, epoch: int):
         self.np_rng = np.random.default_rng(self.init_seed + epoch)
+        self._indices_cache = None
 
     def _get_one_recording_sample_indices(
         self,

@@ -197,7 +197,7 @@ def instantiate(dictconfig: DictConfig | dict, *args, **kwargs) -> Any:
         An instance of the specified class
     """
     if isinstance(dictconfig, DictConfig):
-        cfg_dict = OmegaConf.to_container(dictconfig)
+        cfg_dict = OmegaConf.to_container(dictconfig, resolve=True)
     else:
         cfg_dict = copy.deepcopy(dictconfig)
 

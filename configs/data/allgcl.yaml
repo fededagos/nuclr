@@ -1,0 +1,15 @@
+data_root: ../data/processed
+brainset: euler_allgcl_2025
+splits_file: ../data/splits.json
+units_file: ../data/units.parquet
+train_split: train
+val_split: valid
+ctx_duration: 32.768
+pairing:
+  mode: recording
+  max_distance: 240.0
+evaluator:
+  _target_: src.evaluators.allgcl.AllGCLEvaluator
+  units_file: ${data.units_file}
+  n_units_subsample: 5000
+  seed: ${seed}

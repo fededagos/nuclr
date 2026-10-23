@@ -15,7 +15,12 @@ def rankme(x: torch.Tensor, normalize: bool = True) -> float:
         x = F.normalize(x, dim=-1)
 
     try:
-        cov = torch.cov(x.T).float()
+        if len(x) < x.shape[1]:
+            # The small Gram matrix has the same nonzero spectrum as covariance.
+            centered = x - x.mean(dim=0, keepdim=True)
+            cov = ((centered @ centered.T) / (len(x) - 1)).float()
+        else:
+            cov = torch.cov(x.T).float()
         eigvals = torch.linalg.eigvalsh(cov)
         eigvals = eigvals / eigvals.sum()
         eigvals = eigvals[eigvals > 0]

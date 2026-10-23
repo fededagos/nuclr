@@ -13,7 +13,8 @@ from src.utils import instantiate
 
 def train(rank: int, world_size: int, cfg: DictConfig):
 
-    torch.cuda.set_device(rank)  # avoid putting things on GPU0 by default
+    if cfg.get("device", "auto") != "cpu" and torch.cuda.is_available():
+        torch.cuda.set_device(rank)  # avoid putting things on GPU0 by default
 
     trainer: Trainer = instantiate(
         cfg.trainer,
@@ -25,13 +26,13 @@ def train(rank: int, world_size: int, cfg: DictConfig):
     cleanup_ddp()
 
 
-@hydra.main(version_base="1.2", config_path="./configs", config_name="train.yaml")
+@hydra.main(version_base="1.2", config_path="./configs", config_name="train_ca")
 def main(cfg: DictConfig):
     hydra_choices = HydraConfig.get().runtime.choices
     with open_dict(cfg):
         cfg.hydra_choices = hydra_choices
 
-    num_gpus = torch.cuda.device_count()
+    num_gpus = 0 if cfg.get("device", "auto") == "cpu" else torch.cuda.device_count()
 
     if num_gpus > 1 or cfg.ddp.force:
         if cfg.ddp.master_port is None:
@@ -42,7 +43,7 @@ def main(cfg: DictConfig):
     for rank in range(1, num_gpus):
         mp.Process(target=train, args=(rank, num_gpus, cfg)).start()
 
-    train(0, num_gpus, cfg)
+    train(0, max(1, num_gpus), cfg)
 
 
 if __name__ == "__main__":

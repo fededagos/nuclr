@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 import torch.distributed as dist
@@ -45,6 +46,14 @@ class Logger:
     @skip_if_dummy
     def init_wandb(self, cfg: DictConfig):
         Path(cfg.dir).mkdir(exist_ok=True, parents=True)
+        if cfg.mode == "offline":
+            # W&B artifact staging otherwise writes outside the job's output directory.
+            for key, subdir in (
+                ("WANDB_DATA_DIR", "staging"),
+                ("WANDB_CACHE_DIR", "cache"),
+                ("WANDB_CONFIG_DIR", "config"),
+            ):
+                os.environ[key] = str(Path(cfg.dir).resolve() / subdir)
         wandb.init(**cfg)  # type: ignore
         assert wandb.run is not None
         self.wandb_run = wandb.run
@@ -61,7 +70,7 @@ class Logger:
 
     def warn(self, msg, all_ranks=False):
         if all_ranks or not self.dummy:
-            self.cli_log.warn(msg, stacklevel=2)
+            self.cli_log.warning(msg, stacklevel=2)
 
     def error(self, msg):
         self.cli_log.error(msg, stacklevel=2)

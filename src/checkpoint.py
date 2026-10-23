@@ -21,5 +21,7 @@ def save_ckpt(filepath: Path, **kwargs) -> Path:
             checkpoint[k] = v
 
     filepath.parent.mkdir(exist_ok=True, parents=True)
-    torch.save(checkpoint, filepath)
+    temporary = filepath.with_suffix(".pt.tmp")
+    torch.save(checkpoint, temporary)
+    temporary.replace(filepath)
     return filepath
