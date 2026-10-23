@@ -37,9 +37,12 @@ class UnitDropout:
             return apply_unit_mask_(data, sampled_unit_mask)
         elif hasattr(data, "calcium_traces"):
             data = cast(CalciumData, data)
-            df_over_f = data.calcium_traces.df_over_f
-            assert df_over_f.shape[1] == num_units_before
-            data.calcium_traces.df_over_f = df_over_f[:, sampled_unit_mask]
+            for key in ("df_over_f", "df_over_f_norm"):
+                if hasattr(data.calcium_traces, key):
+                    values = getattr(data.calcium_traces, key)
+                    assert values.shape[1] == num_units_before
+                    setattr(data.calcium_traces, key, values[:, sampled_unit_mask])
+            data.units = data.units.select_by_mask(sampled_unit_mask)
             return data
         else:
             raise NotImplementedError()
