@@ -1,4 +1,6 @@
 import json
+import h5py
+import pytest
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -10,14 +12,23 @@ from src.utils import Precision, instantiate
 from src.trainers.forward import ForwardPass
 
 
-def test_forward_scopes(tmp_path):
+@pytest.mark.parametrize("missing_condition", [False, True])
+def test_forward_scopes(tmp_path, missing_condition):
     from fixtures.make_synthetic import make_synthetic
 
     synthetic_export = make_synthetic(tmp_path / "data", valid_conditions=["c1"] * 4)
+    if missing_condition:
+        with h5py.File(
+            synthetic_export / "processed/euler_allgcl_2025/synthetic_train.h5", "r+"
+        ) as f:
+            values = f["calcium_traces/df_over_f_norm"][:]
+            values[f["calcium_traces/timestamps"][:] >= 360.0, 0] = np.nan
+            f["calcium_traces/df_over_f_norm"][:] = values
     model_cfg = OmegaConf.load("configs/model/nuclr_v2ga_ca2.yaml")
     model_cfg.ctx_duration = 32.768
     model_cfg.sampling_rate = 7.8125
     model_cfg.patch_size = 8
+    model_cfg.drop_nonfinite_units = True
     model_cfg.t_layers = model_cfg.st_layers = (
         0  # CPU; full attention is checked on A100.
     )
@@ -47,6 +58,9 @@ def test_forward_scopes(tmp_path):
             ],
         )
     ForwardPass(cfg, rank=0, world_size=1).train()
+    import wandb
+
+    wandb.finish()
     df = pd.read_parquet(output / "embeddings.parquet")
     all_rows = df[df.scope == "all"].set_index("unit_id")
     assert len(all_rows) == 80
@@ -57,7 +71,15 @@ def test_forward_scopes(tmp_path):
         "stimulus:chirp",
         "stimulus:movingbar",
     }
-    assert set(all_rows.n_windows) == {12}
+    assert np.isfinite(np.stack(df.emb)).all()
+    if missing_condition:
+        assert all_rows.loc["synthetic_train_roi0", "n_windows"] == 6
+        assert set(all_rows.drop(index="synthetic_train_roi0").n_windows) == {12}
+        assert not (
+            (df.unit_id == "synthetic_train_roi0") & (df.scope == "condition:d")
+        ).any()
+    else:
+        assert set(all_rows.n_windows) == {12}
     assert not (
         (df.unit_id.str.startswith("synthetic_valid")) & (df.scope == "condition:d")
     ).any()

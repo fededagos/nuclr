@@ -34,6 +34,7 @@ def test_smoke_export_paired_tokenization(smoke_export, mode):
         7.8125,
         8,
     )
+    model_cfg.drop_nonfinite_units = True
     model = instantiate(model_cfg, precision=Precision("fp32"))
     metadata = pd.read_parquet(smoke_export / "units.parquet")
     indices = list(
@@ -63,6 +64,8 @@ def test_smoke_export_paired_tokenization(smoke_export, mode):
             )
         pair = TwoViewData.from_two_views([model.tokenize(view) for view in views])
         batch = TwoViewData.collate([pair])
-        assert batch.view1.data["enc_input"]["bins"].shape == (len(ids) * 32, 8)
-        assert batch.view2.data["enc_input"]["bins"].shape == (len(ids) * 32, 8)
-        assert batch.match_idx[0].shape == (2, len(ids))
+        for view in (batch.view1, batch.view2):
+            assert view.data["enc_input"]["bins"].shape == (len(view.unit_ids) * 32, 8)
+            assert view.data["enc_input"]["bins"].isfinite().all()
+        n_matches = len(np.intersect1d(batch.view1.unit_ids, batch.view2.unit_ids))
+        assert batch.match_idx[0].shape == (2, n_matches)

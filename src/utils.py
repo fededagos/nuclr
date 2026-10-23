@@ -212,6 +212,18 @@ def is_divisible(x: float, y: float, tol: float = 1e-6) -> bool:
     return abs(x / y - round(x / y)) < tol
 
 
+def apply_calcium_unit_mask_(data, mask):
+    """Keep calcium metadata and trace columns in the same unit order."""
+    num_units = len(data.units)
+    for key in ("df_over_f", "df_over_f_norm"):
+        if hasattr(data.calcium_traces, key):
+            values = getattr(data.calcium_traces, key)
+            assert values.shape[1] == num_units
+            setattr(data.calcium_traces, key, values[:, mask])
+    data.units = data.units.select_by_mask(mask)
+    return data
+
+
 def apply_unit_mask_(data, mask):
     num_units_before = len(data.units)
     data.units = data.units.select_by_mask(mask)

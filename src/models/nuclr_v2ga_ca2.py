@@ -16,7 +16,7 @@ from ..utils import Precision
 from ..dataset import ViewData
 from ..nn.attention import RotarySelfAttention
 from ..nn.rotary_embedding import RotaryEmbedding
-from ..utils import get_cli_logger
+from ..utils import get_cli_logger, apply_calcium_unit_mask_
 
 
 logger = get_cli_logger()
@@ -37,6 +37,7 @@ class NuclrV2gaCa2(BaseNeuronEncoder):
         st_layers: int,
         rot_ratio: float = 0.5,
         sampling_rate: float | None = None,
+        drop_nonfinite_units: bool = False,
     ):
         super().__init__()
 
@@ -46,6 +47,7 @@ class NuclrV2gaCa2(BaseNeuronEncoder):
         self.emb_dim = self.dim = dim
 
         self.sampling_rate = sampling_rate
+        self.drop_nonfinite_units = drop_nonfinite_units
         if patch_size <= 0:
             raise ValueError("patch_size must be positive")
         if sampling_rate is None:
@@ -169,6 +171,10 @@ class NuclrV2gaCa2(BaseNeuronEncoder):
         return y
 
     def tokenize(self, view: Data) -> ViewData:
+        if self.drop_nonfinite_units:
+            valid = np.isfinite(view.calcium_traces.df_over_f_norm).all(axis=0)
+            if not valid.all():
+                apply_calcium_unit_mask_(view, valid)
         unit_ids: np.ndarray = view.units.id  # pyright: ignore
         traces = view.calcium_traces  # type: ignore
         num_units = len(unit_ids)

@@ -3,7 +3,7 @@ import numpy as np
 from temporaldata import Data
 
 from ..dataset import SpikeData, CalciumData
-from ..utils import apply_unit_mask_
+from ..utils import apply_unit_mask_, apply_calcium_unit_mask_
 
 
 class UnitDropout:
@@ -37,12 +37,6 @@ class UnitDropout:
             return apply_unit_mask_(data, sampled_unit_mask)
         elif hasattr(data, "calcium_traces"):
             data = cast(CalciumData, data)
-            for key in ("df_over_f", "df_over_f_norm"):
-                if hasattr(data.calcium_traces, key):
-                    values = getattr(data.calcium_traces, key)
-                    assert values.shape[1] == num_units_before
-                    setattr(data.calcium_traces, key, values[:, sampled_unit_mask])
-            data.units = data.units.select_by_mask(sampled_unit_mask)
-            return data
+            return apply_calcium_unit_mask_(data, sampled_unit_mask)
         else:
             raise NotImplementedError()

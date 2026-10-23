@@ -196,6 +196,7 @@ class ForwardPass(Trainer):
             for rec in self.dataset.recording_dict:
                 data = self.dataset._get_data_object(rec)
                 ids = np.asarray(data.units.id).astype(str)
+                unit_index = {uid: i for i, uid in enumerate(ids)}
                 accumulators = {}
                 for j, (start, end) in enumerate(
                     zip(data.blocks.start, data.blocks.end)
@@ -216,7 +217,7 @@ class ForwardPass(Trainer):
                                 np.zeros(
                                     (len(ids), self.model.emb_dim), dtype=np.float64
                                 ),
-                                0,
+                                np.zeros(len(ids), dtype=np.int64),
                             ],
                         )
                     duration = self.model.ctx_duration
@@ -228,6 +229,9 @@ class ForwardPass(Trainer):
                             float(start + (k + 1) * duration),
                         )
                         view = self.model.tokenize(get_window(self.dataset, index))
+                        if not len(view.unit_ids):
+                            continue
+                        positions = np.array([unit_index[uid] for uid in view.unit_ids])
                         batch = ViewData.collate([view]).to(self.device)
                         context = (
                             torch.autocast("cuda", dtype=self.precision.dtype)
@@ -247,21 +251,25 @@ class ForwardPass(Trainer):
                                 f"Non-finite embedding in {rec} at {index.start}"
                             )
                         for scope in scopes:
-                            accumulators[scope][0] += values
-                            accumulators[scope][1] += 1
-                for scope, (total, count) in accumulators.items():
-                    values = (
-                        total / count if count else np.full_like(total, np.nan)
-                    ).astype(np.float32)
+                            accumulators[scope][0][positions] += values
+                            accumulators[scope][1][positions] += 1
+                for scope, (total, counts) in accumulators.items():
+                    observed = counts > 0
+                    if not observed.any():
+                        continue
+                    values = (total[observed] / counts[observed, None]).astype(
+                        np.float32
+                    )
+                    observed_ids = ids[observed]
                     emb = pa.FixedSizeListArray.from_arrays(
                         pa.array(values.ravel(), type=pa.float32()), self.model.emb_dim
                     )
                     writer.write_table(
                         pa.Table.from_arrays(
                             [
-                                pa.array(ids),
-                                pa.array([scope] * len(ids)),
-                                pa.array([count] * len(ids), type=pa.int64()),
+                                pa.array(observed_ids),
+                                pa.array([scope] * len(observed_ids)),
+                                pa.array(counts[observed], type=pa.int64()),
                                 emb,
                             ],
                             schema=schema,
