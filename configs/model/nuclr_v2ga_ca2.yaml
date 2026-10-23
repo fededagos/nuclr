@@ -1,5 +1,6 @@
 _target_: src.models.nuclr_v2ga_ca2.NuclrV2gaCa2
 ctx_duration: null  # set in train script
+sampling_rate: 4.283719091942589
 patch_size: 4
 
 dim: 256

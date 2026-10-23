@@ -10,7 +10,7 @@ defaults:
 data_root: ../data/processed
 
 views:
-  duration: 30.0  # in seconds
+  duration: 29.88057742646106  # in seconds
   max_distance: 240.0  # in seconds
 
 seed: 42
