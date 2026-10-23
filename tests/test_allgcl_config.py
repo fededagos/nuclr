@@ -120,6 +120,12 @@ def test_cpu_train_writes_best_and_respects_step_limit(synthetic_export, tmp_pat
     assert best["epoch"] == ckpt["epoch"]
     assert isinstance(best["val_loss"], float)
     assert ckpt["best_val_loss"] == best["val_loss"]
+    # Simulate interruption after the atomic checkpoint but before best.json.
+    (Path(cfg.output_dir) / "best.json").unlink()
+    wandb.finish()
+    resumed = ContrastiveTrainer(cfg, rank=0, world_size=1)
+    assert resumed.train_step == 2
+    assert json.loads((Path(cfg.output_dir) / "best.json").read_text()) == best
     wandb.finish()
 
 

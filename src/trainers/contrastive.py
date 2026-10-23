@@ -62,9 +62,11 @@ class ContrastiveTrainer(Trainer):
             )
             self.add_checkpoint_items(scheduler=self.scheduler)
         self._apply_ckpt(ckpt)
+        resuming = ckpt is not None and self.cfg.ckpt.resume
         self.best_val_loss = (
-            ckpt.get("best_val_loss", float("inf")) if ckpt else float("inf")
+            ckpt.get("best_val_loss", float("inf")) if resuming else float("inf")
         )
+        self.best_record = ckpt.get("best_record") if resuming else None
         self.model = self.make_ddp(self.model)  # type: ignore
         self.loss = self.make_ddp(self.loss)  # type: ignore
 

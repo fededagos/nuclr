@@ -89,28 +89,21 @@ class Trainer(ABC):
             if improved:
                 self.best_val_loss = val_loss
             if self.cfg.get("output_dir"):
+                if improved and self.rank == 0 and self.ckpt_dir is not None:
+                    self.best_record = {
+                        "epoch": self.epoch,
+                        "val_loss": val_loss,
+                        "ckpt": str(
+                            (self.ckpt_dir / f"epoch_{self.epoch}.pt").resolve()
+                        ),
+                    }
                 self.add_checkpoint_items(
-                    best_val_loss=getattr(self, "best_val_loss", float("inf"))
+                    best_val_loss=getattr(self, "best_val_loss", float("inf")),
+                    best_record=getattr(self, "best_record", None),
                 )
-            self._save_checkpoint()
-            if (
-                improved
-                and self.rank == 0
-                and self.ckpt_dir is not None
-                and self.cfg.get("output_dir")
-            ):
-                best_path = Path(self.cfg.output_dir) / "best.json"
-                temporary = best_path.with_suffix(".json.tmp")
-                temporary.write_text(
-                    json.dumps(
-                        {
-                            "epoch": self.epoch,
-                            "val_loss": val_loss,
-                            "ckpt": str(self.last_ckpt_path.resolve()),
-                        }
-                    )
-                )
-                temporary.replace(best_path)
+            self._save_checkpoint(force=improved)
+            if improved:
+                self._write_best_json()
             limit = self.cfg.get("max_steps") or self.cfg.get("target_steps")
             if limit is not None and self.train_step >= limit:
                 break
@@ -183,13 +176,27 @@ class Trainer(ABC):
         else:
             self.logger.warn(f"No items specified for checkpointing")
 
+        # Recover publication if interrupted between checkpoint and JSON replacement.
+        self._write_best_json()
+
     @rank_zero_only
-    def _save_checkpoint(self):
+    def _write_best_json(self):
+        if not self.cfg.get("output_dir") or not getattr(self, "best_record", None):
+            return
+        best_path = Path(self.cfg.output_dir) / "best.json"
+        temporary = best_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(self.best_record))
+        temporary.replace(best_path)
+
+    @rank_zero_only
+    def _save_checkpoint(self, force=False):
         if self.ckpt_dir is None:
             return
 
         every_n_epochs = self.cfg.ckpt.every_n_epochs
-        if (every_n_epochs is None) or (self.epoch % every_n_epochs != 0):
+        if not force and (
+            (every_n_epochs is None) or (self.epoch % every_n_epochs != 0)
+        ):
             return
 
         self.last_ckpt_path = save_ckpt(
