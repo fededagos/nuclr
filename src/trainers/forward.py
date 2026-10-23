@@ -1,4 +1,8 @@
 from typing import Optional
+import json
+import math
+from contextlib import nullcontext
+from omegaconf import OmegaConf
 
 from pathlib import Path
 import numpy as np
@@ -11,7 +15,9 @@ from torch_brain.data.sampler import SequentialFixedWindowSampler
 from temporaldata import Interval
 
 from src.models import BaseNeuronEncoder
-from src.dataset import ViewData
+from src.dataset import ViewData, get_window
+from torch_brain.data.dataset import DatasetIndex
+from src.allgcl import split_selection
 from src.samplers import (
     DistributedSamplerWrapper,
 )
@@ -22,14 +28,34 @@ from src.utils import instantiate, expand_path
 
 
 class ForwardPass(Trainer):
-    """Does a forward pass over the train_dataset,
-    and stores the embeddings in a .pt file located
-    at cfg.embs_root / run_id / embs_epoch_{epoch_num}.pt
+    """Export neuron embeddings, with split and block scopes for All-GCL.
+
+    Existing configs retain the original train-dataset .pt output path.
     """
 
     def setup(self, ckpt: Optional[CheckpointDict]):
         if ckpt is None:
             raise ValueError("Must provide ckpt")
+
+        self.scoped = bool(self.cfg.get("scopes"))
+        if self.scoped:
+            if self.world_size != 1:
+                raise ValueError("Scoped forward currently requires one process/GPU")
+            unknown = set(self.cfg.scopes) - {"all", "condition", "stimulus"}
+            if unknown:
+                raise ValueError(f"Unknown scopes: {unknown}")
+            self._setup_model(ckpt)
+            self.forward_epoch = ckpt["epoch"]
+            self.model_config = OmegaConf.to_container(
+                ckpt["cfg"]["model"], resolve=True
+            )
+            self.dataset = Dataset(
+                root=self.cfg.data_root,
+                config=split_selection(self.cfg.data, self.cfg.splits),
+                unit_id_prefix_fn=lambda _: "",
+                session_id_prefix_fn=lambda _: "",
+            )
+            return
 
         embs_dir = expand_path(self.cfg.embs_root) / ckpt["run_id"]
         embs_dir.mkdir(exist_ok=True, parents=True)
@@ -62,6 +88,9 @@ class ForwardPass(Trainer):
         self.model = self.model.eval().to(self.device)
 
     def train(self):
+        if self.scoped:
+            self._forward_scopes()
+            return
         self.val_epoch()
         unit_emb, unit_ids = self.emb_collector.compute()
         if self.rank == 0:
@@ -145,3 +174,107 @@ class ForwardPass(Trainer):
             dim=self.model.emb_dim,
             device=self.device,
         )
+
+    @torch.inference_mode()
+    def _forward_scopes(self):
+        """Encode each non-overlapping block window once, then average by scope."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        output = Path(self.cfg.output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        temporary = output / "embeddings.parquet.tmp"
+        schema = pa.schema(
+            [
+                ("unit_id", pa.string()),
+                ("scope", pa.string()),
+                ("n_windows", pa.int64()),
+                ("emb", pa.list_(pa.float32(), self.model.emb_dim)),
+            ]
+        )
+        with pq.ParquetWriter(temporary, schema) as writer:
+            for rec in self.dataset.recording_dict:
+                data = self.dataset._get_data_object(rec)
+                ids = np.asarray(data.units.id).astype(str)
+                accumulators = {}
+                for j, (start, end) in enumerate(
+                    zip(data.blocks.start, data.blocks.end)
+                ):
+                    scopes = []
+                    if "all" in self.cfg.scopes:
+                        scopes.append("all")
+                    for kind in ("condition", "stimulus"):
+                        if kind in self.cfg.scopes:
+                            label = np.asarray(getattr(data.blocks, kind)).astype(str)[
+                                j
+                            ]
+                            scopes.append(f"{kind}:{label}")
+                    for scope in scopes:
+                        accumulators.setdefault(
+                            scope,
+                            [
+                                np.zeros(
+                                    (len(ids), self.model.emb_dim), dtype=np.float64
+                                ),
+                                0,
+                            ],
+                        )
+                    duration = self.model.ctx_duration
+                    count = math.floor((end - start + 1e-8) / duration)
+                    for k in range(count):
+                        index = DatasetIndex(
+                            rec,
+                            float(start + k * duration),
+                            float(start + (k + 1) * duration),
+                        )
+                        view = self.model.tokenize(get_window(self.dataset, index))
+                        batch = ViewData.collate([view]).to(self.device)
+                        context = (
+                            torch.autocast("cuda", dtype=self.precision.dtype)
+                            if self.device.type == "cuda"
+                            and self.precision.dtype != torch.float32
+                            else nullcontext()
+                        )
+                        with context:
+                            values = (
+                                self.model(**batch.data["enc_input"])
+                                .float()
+                                .cpu()
+                                .numpy()
+                            )
+                        if not np.isfinite(values).all():
+                            raise ValueError(
+                                f"Non-finite embedding in {rec} at {index.start}"
+                            )
+                        for scope in scopes:
+                            accumulators[scope][0] += values
+                            accumulators[scope][1] += 1
+                for scope, (total, count) in accumulators.items():
+                    values = (
+                        total / count if count else np.full_like(total, np.nan)
+                    ).astype(np.float32)
+                    emb = pa.FixedSizeListArray.from_arrays(
+                        pa.array(values.ravel(), type=pa.float32()), self.model.emb_dim
+                    )
+                    writer.write_table(
+                        pa.Table.from_arrays(
+                            [
+                                pa.array(ids),
+                                pa.array([scope] * len(ids)),
+                                pa.array([count] * len(ids), type=pa.int64()),
+                                emb,
+                            ],
+                            schema=schema,
+                        )
+                    )
+        temporary.replace(output / "embeddings.parquet")
+        metadata = {
+            "ckpt": str(Path(self.cfg.ckpt.load_from).resolve()),
+            "epoch": self.forward_epoch,
+            "config": OmegaConf.to_container(self.cfg, resolve=True),
+            "model_config": self.model_config,
+        }
+        meta_path = output / "embeddings_meta.json"
+        temporary_meta = meta_path.with_suffix(".json.tmp")
+        temporary_meta.write_text(json.dumps(metadata, default=str, indent=2))
+        temporary_meta.replace(meta_path)

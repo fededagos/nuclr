@@ -1,0 +1,13 @@
+defaults:
+  - train_allgcl
+  - override /trainer: forward
+  - _self_
+
+splits: [train, valid, test]
+scopes: [all, condition, stimulus]
+resume: false
+batch_size: 1
+ckpt:
+  enable: false
+  load_from: null
+  resume: false
