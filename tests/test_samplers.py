@@ -20,3 +20,21 @@ def test_requested_epoch_survives_cached_length(distributed):
     fresh = make()
     fresh.set_epoch(4)
     assert list(cached) == list(fresh)
+
+
+def test_empty_recording_does_not_abort_nonempty_epoch():
+    sampler = RandomFixedWindowSampler(
+        {"long": Interval(0.0, 20.0), "short": Interval(100.0, 101.1)},
+        window_length=1.0,
+        seed=42,
+    )
+    indices = list(sampler)
+    assert indices and all(index.recording_id == "long" for index in indices)
+
+
+def test_whole_empty_epoch_raises_clearly():
+    sampler = RandomFixedWindowSampler(
+        {"short": Interval(0.0, 1.1)}, window_length=1.0, seed=42
+    )
+    with pytest.raises(ValueError, match="epoch.*empty|empty.*epoch"):
+        list(sampler)

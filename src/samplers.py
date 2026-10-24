@@ -264,7 +264,6 @@ class RandomFixedWindowSampler(torch.utils.data.Sampler):
                     DatasetIndex(rec_id, _start, _start + self.window_length)
                 )
 
-        assert len(sample_indices) > 0
         return sample_indices
 
     def _prepare_indices_cache(self):
@@ -275,6 +274,8 @@ class RandomFixedWindowSampler(torch.utils.data.Sampler):
         for rec_id in self.sampling_intervals.keys():
             self._indices_cache.extend(self._get_one_recording_sample_indices(rec_id))
 
+        if not self._indices_cache:
+            raise ValueError("Sampling epoch is empty")
         self.np_rng.shuffle(self._indices_cache)
 
     def __len__(self) -> int:

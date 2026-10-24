@@ -75,6 +75,9 @@ model:
 optim:
   lr: ${lr.max}
 
+loss:
+  scale_same_view: true
+
 hydra:
   run:
     dir: ${output_dir}/hydra

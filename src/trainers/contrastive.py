@@ -26,10 +26,27 @@ from src.utils import (
     get_num_params,
     get_num_trainable_params,
     validate_weights,
+    seed_everything,
 )
 from src.evaluators.collector import EmbeddingCollector
 from src.trainers.trainer import Trainer, CheckpointDict
 from src.utils import instantiate
+
+
+def seed_train_worker(worker_id):
+    """Also seed the dataset's explicit Generator, beyond PyTorch's worker RNGs."""
+    worker = torch.utils.data.get_worker_info()
+    worker.dataset.np_rng = np.random.default_rng(torch.initial_seed())
+
+
+def train_loader_randomness(seed, rank):
+    """Preserve legacy rank 0 exactly; give other ranks private worker streams."""
+    if rank == 0:
+        return {}
+    return {
+        "generator": torch.Generator().manual_seed(seed + rank),
+        "worker_init_fn": seed_train_worker,
+    }
 
 
 class ContrastiveTrainer(Trainer):
@@ -69,6 +86,13 @@ class ContrastiveTrainer(Trainer):
         self.best_record = ckpt.get("best_record") if resuming else None
         self.model = self.make_ddp(self.model)  # type: ignore
         self.loss = self.make_ddp(self.loss)  # type: ignore
+        # Initialization and both parameter broadcasts must precede rank offsets.
+        # Rank 0 is deliberately a no-op: resetting it would change legacy draws.
+        if self.is_distributed and self.rank != 0:
+            seed_everything(self.cfg.seed + self.rank)
+            self.train_loader.dataset.np_rng = np.random.default_rng(
+                self.cfg.seed + self.rank
+            )
 
     def train_epoch(self):
         self.model.train()
@@ -306,6 +330,7 @@ class ContrastiveTrainer(Trainer):
             multiprocessing_context=mp.get_context("fork") if multi_wrkrs else None,
             persistent_workers=multi_wrkrs,
             drop_last=True,
+            **train_loader_randomness(self.cfg.seed, self.rank),
         )
 
         self.steps_per_epoch = len(self.train_loader)

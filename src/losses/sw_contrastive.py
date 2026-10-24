@@ -21,11 +21,15 @@ class SampleWiseContrastiveLoss(Loss):
         model: BaseNeuronEncoder,
         projector: bool = True,
         full_denom: bool = False,
+        scale_same_view: bool = False,
     ):
         super().__init__()
         self.tau = tau
         self.dcl = dcl
         self.full_denom = full_denom
+        if not isinstance(scale_same_view, bool):
+            raise TypeError("scale_same_view must be a bool")
+        self.scale_same_view = scale_same_view
 
         dim_in = model.emb_dim
 
@@ -126,9 +130,13 @@ class SampleWiseContrastiveLoss(Loss):
 
         if self.full_denom:
             sim11 = (x1 @ x1.T).fill_diagonal_(float("-inf"))
+            if self.scale_same_view:
+                sim11 = sim11 / self.tau
             sim1 = torch.cat((sim12, sim11), dim=1)[match_idx[0]]
 
             sim22 = (x2 @ x2.T).fill_diagonal_(float("-inf"))
+            if self.scale_same_view:
+                sim22 = sim22 / self.tau
             sim2 = torch.cat((sim12.T, sim22), dim=1)[match_idx[1]]
         else:
             sim1 = sim12.clone()[match_idx[0]]

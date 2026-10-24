@@ -1,4 +1,5 @@
 import hydra
+import os
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, open_dict
 
@@ -26,11 +27,29 @@ def train(rank: int, world_size: int, cfg: DictConfig):
     cleanup_ddp()
 
 
+def launch_from_torchrun(cfg: DictConfig) -> bool:
+    """Use torchrun's single-node ranks without spawning a second process tree."""
+    if "LOCAL_RANK" not in os.environ:
+        return False
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    if rank != local_rank:
+        raise ValueError("This entry point currently supports single-node torchrun")
+    cfg.ddp.master_addr = os.environ["MASTER_ADDR"]
+    cfg.ddp.master_port = int(os.environ["MASTER_PORT"])
+    train(rank, world_size, cfg)
+    return True
+
+
 @hydra.main(version_base="1.2", config_path="./configs", config_name="train_ca")
 def main(cfg: DictConfig):
     hydra_choices = HydraConfig.get().runtime.choices
     with open_dict(cfg):
         cfg.hydra_choices = hydra_choices
+
+    if launch_from_torchrun(cfg):
+        return
 
     num_gpus = 0 if cfg.get("device", "auto") == "cpu" else torch.cuda.device_count()
 

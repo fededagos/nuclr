@@ -3,3 +3,4 @@ tau: 0.2
 dcl: true
 projector: true
 full_denom: true
+scale_same_view: false
