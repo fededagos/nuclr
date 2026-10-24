@@ -1,0 +1,6 @@
+_target_: src.transforms.calcium_augmentation.CalciumTrainingViews
+min_units: 0.5
+augmentation: 'off'  # off | jitter | scale | noise | all; training views only
+jitter_frames: 1  # 128 ms at 7.8125 Hz; edge padding, no wrap
+gain_range: [0.8, 1.2]
+noise_sigma: 0.2  # baseline SD, about 0.23 * train residual SD; converted to p99 units

@@ -4,7 +4,7 @@ defaults:
   - loss: sw_dcl
   - optim: adamw
   - trainer: contrastive
-  - train_transform: unit_dropout
+  - train_transform: calcium_training_views
   - _self_
 
 data_root: ${data.data_root}

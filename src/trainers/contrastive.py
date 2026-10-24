@@ -15,7 +15,8 @@ from torch_brain.transforms import Compose
 
 from src.models import BaseNeuronEncoder
 from src.losses import Loss
-from src.dataset import TwoViewDataset, TwoViewData, ViewData
+from src.dataset import TwoViewDataset, TwoViewData, ViewData, get_window
+from torch_brain.data.dataset import DatasetIndex
 from src.samplers import (
     RandomFixedWindowSampler,
     DistributedSamplerWrapper,
@@ -32,6 +33,25 @@ from src.trainers.trainer import Trainer, CheckpointDict
 from src.utils import instantiate
 
 
+class CleanWindowDataset(torch.utils.data.Dataset):
+    """Own clean HDF5 data explicitly; no local class can capture it or the model."""
+
+    def __init__(self, dataset, tokenize):
+        self.dataset = dataset
+        self.tokenize = tokenize
+
+    def __getitem__(self, index):
+        if self.dataset is None:
+            raise RuntimeError("Clean monitor dataset is closed")
+        return self.tokenize(get_window(self.dataset, index))
+
+    def close(self):
+        dataset, self.dataset = self.dataset, None
+        self.tokenize = None
+        if dataset is not None:
+            dataset._close_open_files()
+
+
 class ContrastiveTrainer(Trainer):
     def setup(self, ckpt: Optional[CheckpointDict]):
         self.cfg.model.ctx_duration = self.cfg.views.duration
@@ -41,6 +61,7 @@ class ContrastiveTrainer(Trainer):
         self._setup_val_loader()
         self._setup_embedding_collectors()
         self._setup_evaluator()
+        self._setup_clean_monitor_loader()
 
         self._setup_optimizer()
         if self.cfg.get("target_steps") is not None:
@@ -69,6 +90,65 @@ class ContrastiveTrainer(Trainer):
         self.best_record = ckpt.get("best_record") if resuming else None
         self.model = self.make_ddp(self.model)  # type: ignore
         self.loss = self.make_ddp(self.loss)  # type: ignore
+
+    def train(self):
+        try:
+            return super().train()
+        finally:
+            self.close()
+
+    def close(self):
+        """Release only the HDF5 files owned by the optional clean monitor."""
+        loader = getattr(self, "clean_monitor_loader", None)
+        self.clean_monitor_loader = None
+        if loader is not None:
+            loader.dataset.close()
+
+    def _setup_clean_monitor_loader(self):
+        self.clean_monitor_loader = None
+        self.clean_monitor_setup_seconds = 0.0
+        if (
+            self.cfg.data.evaluator is None
+            or self.cfg.train_transform.get("augmentation", "off") == "off"
+            or self.cfg.debug is not None
+            or self.cfg.val.first
+        ):
+            return
+
+        started = time.perf_counter()
+        dataset = Dataset(
+            root=self.cfg.data_root,
+            config=self.cfg.data.train_dataset,
+            unit_id_prefix_fn=lambda _: "",
+        )
+        # setup runs before DDP wrapping: retain only the underlying tokenizer.
+        clean = CleanWindowDataset(dataset, self.model.tokenize)
+        try:
+            intervals = self.train_loader.dataset.sanitized_sampling_intervals
+            sampler = DistributedSamplerWrapper(
+                [
+                    DatasetIndex(
+                        recording, float(start), float(start) + self.cfg.views.duration
+                    )
+                    for recording, blocks in sorted(intervals.items())
+                    for start in blocks.start
+                ]
+            )
+            self.clean_monitor_loader = DataLoader(
+                clean,
+                sampler=sampler,
+                batch_size=self.cfg.batch_size // self.world_size,
+                collate_fn=ViewData.collate,
+                num_workers=0,
+                generator=torch.Generator().manual_seed(self.cfg.seed),
+            )
+        except BaseException:
+            clean.close()
+            raise
+        self.clean_monitor_setup_seconds = time.perf_counter() - started
+        self.logger.info(
+            f"Clean monitor setup: {self.clean_monitor_setup_seconds:.4f}s (once)"
+        )
 
     def train_epoch(self):
         self.model.train()
@@ -415,12 +495,29 @@ class ContrastiveTrainer(Trainer):
         if self.cfg.val.first:
             return
 
+        clean_monitor_started = None
+        if self.clean_monitor_loader is not None:
+            clean_monitor_started = time.perf_counter()
+            # AUG: the train collector contains augmented training embeddings.
+            # Rebuild it from clean, block-aligned windows at the current eval weights.
+            assert not self.model.training
+            self.train_emb_collector.reset()
+            with torch.inference_mode():
+                for clean in self.clean_monitor_loader:
+                    clean.to(self.device)
+                    with self.autocast():
+                        embeddings = self.model(**clean.data["enc_input"])
+                    self.train_emb_collector.update(embeddings, clean.unit_ids)
         train_unit_embs, train_unit_ids = self.train_emb_collector.compute()
         val_unit_embs, val_unit_ids = self.val_emb_collector.compute()
         if self.rank == 0 and self.evaluator is not None:
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
-            started = time.perf_counter()
+            started = (
+                clean_monitor_started
+                if clean_monitor_started is not None
+                else time.perf_counter()
+            )
             compute_seconds = started - getattr(self, "epoch_started", started)
             metrics = self.evaluator(
                 X_train=train_unit_embs,
@@ -432,6 +529,8 @@ class ContrastiveTrainer(Trainer):
             if self.cfg.data.get("brainset") == "euler_allgcl_2025":
                 seconds = time.perf_counter() - started
                 fraction = seconds / max(compute_seconds, 1e-9)
+                self.last_monitor_seconds = seconds
+                self.last_monitor_epoch_fraction = fraction
                 self.logger.log("monitor/seconds", seconds)
                 self.logger.log("monitor/epoch_fraction", fraction)
                 self.logger.info(
