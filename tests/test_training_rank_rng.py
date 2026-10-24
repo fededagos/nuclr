@@ -81,6 +81,7 @@ def test_setup_seeds_only_nonzero_rank_after_both_broadcasts(
         "_setup_val_loader",
         "_setup_embedding_collectors",
         "_setup_evaluator",
+        "_setup_clean_monitor_loader",
         "_setup_optimizer",
     ):
         monkeypatch.setattr(trainer, name, lambda: None)
