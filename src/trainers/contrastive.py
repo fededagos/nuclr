@@ -81,6 +81,10 @@ class ContrastiveTrainer(Trainer):
         self._setup_clean_monitor_loader()
 
         self._setup_optimizer()
+        if self.cfg.get("debias", {}).get("enabled", False) or self.cfg.get(
+            "debias", {}
+        ).get("track_normalizer", False):
+            self._setup_debias()
         if self.cfg.get("target_steps") is not None:
             total = self.steps_per_epoch * self.cfg.num_epochs
             warmup = max(1, self.steps_per_epoch)
@@ -107,6 +111,10 @@ class ContrastiveTrainer(Trainer):
         self.best_record = ckpt.get("best_record") if resuming else None
         self.model = self.make_ddp(self.model)  # type: ignore
         self.loss = self.make_ddp(self.loss)  # type: ignore
+        if self.cfg.get("debias", {}).get("enabled", False) or self.cfg.get(
+            "debias", {}
+        ).get("track_normalizer", False):
+            self.debias.wrap(self)
         # Initialization and both parameter broadcasts must precede rank offsets.
         # Rank 0 is deliberately a no-op: resetting it would change legacy draws.
         if self.is_distributed and self.rank != 0:
@@ -127,6 +135,13 @@ class ContrastiveTrainer(Trainer):
         self.clean_monitor_loader = None
         if loader is not None:
             loader.dataset.close()
+        if hasattr(self, "debias"):
+            self.debias.close()
+
+    def _setup_debias(self):
+        from src.debias_runtime import DebiasRuntime
+
+        self.debias = DebiasRuntime(self)
 
     def _setup_clean_monitor_loader(self):
         self.clean_monitor_loader = None
@@ -175,6 +190,10 @@ class ContrastiveTrainer(Trainer):
         )
 
     def train_epoch(self):
+        if self.cfg.get("debias", {}).get("enabled", False) or self.cfg.get(
+            "debias", {}
+        ).get("track_normalizer", False):
+            return self.debias.train_epoch(self)
         self.model.train()
         self.loss.train()
         self.train_emb_collector.reset()
@@ -261,6 +280,10 @@ class ContrastiveTrainer(Trainer):
 
     @torch.inference_mode()
     def val_epoch(self):
+        if self.cfg.get("debias", {}).get("enabled", False) and self.cfg.debias.pilot:
+            # Calibration is train-only. Never use validation loss or probes to
+            # select the coefficient (SPEC §8, 2026-10-24 15:40).
+            return
         if self.cfg.debug == "train":
             return
 
@@ -369,6 +392,8 @@ class ContrastiveTrainer(Trainer):
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             if hasattr(self, "scheduler"):
                 self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            if hasattr(self, "debias"):
+                self.debias.load_checkpoint(ckpt)
         elif self.cfg.ckpt.model_only:
             self.loss.load_state_dict(ckpt["loss_state_dict"])
 
@@ -378,6 +403,10 @@ class ContrastiveTrainer(Trainer):
             config=self.cfg.data.train_dataset,
             unit_id_prefix_fn=lambda _: "",
         )
+        if self.cfg.get("debias", {}).get("enabled", False) or self.cfg.get(
+            "debias", {}
+        ).get("track_normalizer", False):
+            ds.debias_conditions = True
         ds.transform = Compose(
             [
                 instantiate(self.cfg.train_transform),

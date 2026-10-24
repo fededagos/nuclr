@@ -44,8 +44,23 @@ class TwoViewDataset(Dataset):
 
     def _get_one_item(self, index: DatasetIndex) -> ViewData:
         sample = get_window(self, index)
+        if getattr(self, "debias_conditions", False):
+            blocks = self._get_data_object(index.recording_id).blocks
+            inside = (blocks.start <= index.start + 1e-8) & (
+                blocks.end >= index.end - 1e-8
+            )
+            if inside.sum() != 1:
+                raise ValueError("Debias view must lie inside one block")
+            condition = blocks.condition_class[inside][0]
+            if isinstance(condition, bytes):
+                condition = condition.decode("utf8")
+            control = str(condition) == "control"
         if self.transform is not None:
             sample = self.transform(sample)
+        if getattr(self, "debias_conditions", False):
+            from src.debias import attach_condition
+
+            attach_condition(sample, control)
         return sample  # type: ignore
 
     def __getitem__(self, index: DatasetIndex):
@@ -243,6 +258,10 @@ class ViewData:
             recording_ids=np.concatenate([d.recording_ids for d in data_clean]),
         )
         collated_data._unit_seqlen = [len(d.unit_ids) for d in data_clean]
+        if hasattr(data_clean[0], "debias_control"):
+            collated_data.debias_control = np.concatenate(
+                [d.debias_control for d in data_clean]
+            )
         collated_data._batch_size = len(data_clean)
         collated_data._collated = True
         return collated_data

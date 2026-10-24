@@ -78,6 +78,28 @@ optim:
 loss:
   scale_same_view: true
 
+# Opt-in only; a missing/disabled block follows the d0b2c03 training path.
+debias:
+  enabled: false
+  track_normalizer: false
+  normalizer_mode: ema
+  normalizer_momentum: 0.01
+  target: split_group
+  pilot: false
+  ledger_file: null
+  normalizer_file: null
+  lambda_max: 0.0
+  normalization_fit_steps: 125
+  head_warmup_steps: 125
+  encoder_ramp_steps: 1250
+  head_optimizer:
+    lr: 0.0001
+    weight_decay: 0.0
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  head_lr_schedule: constant
+  head_clip_norm: 1.0
+
 hydra:
   run:
     dir: ${output_dir}/hydra
