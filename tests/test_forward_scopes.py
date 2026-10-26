@@ -167,3 +167,46 @@ def test_init_only_rejects_non_boolean(synthetic_export, tmp_path, invalid):
             ForwardPass(cfg, rank=0, world_size=1)
     finally:
         wandb.finish()
+
+
+def test_stimulus_condition_scopes_preserve_existing_rows(synthetic_export, tmp_path):
+    """Adding joint scopes changes no old row, count, or unnormalised mean."""
+    import wandb
+
+    results = []
+    for joint in (False, True):
+        scopes = ["all", "condition", "stimulus"]
+        if joint:
+            scopes.append("stimulus_condition")
+        with initialize_config_dir(config_dir=str(Path("configs").resolve()), version_base="1.2"):
+            cfg = compose(config_name="forward_allgcl", overrides=[
+                f"data.data_root={synthetic_export}/processed",
+                f"data.splits_file={synthetic_export}/splits.json",
+                f"data.units_file={synthetic_export}/units.parquet",
+                f"output_dir={tmp_path}/joint_{joint}",
+                f"scopes={json.dumps(scopes)}",
+                "init_only=true", "seed=42", "device=cpu", "precision=fp32",
+                "num_workers=0", "model.t_layers=0", "model.st_layers=0",
+                "wandb.mode=disabled",
+            ])
+        try:
+            ForwardPass(cfg, rank=0, world_size=1).train()
+        finally:
+            wandb.finish()
+        results.append(pd.read_parquet(Path(cfg.output_dir) / "embeddings.parquet"))
+    old, new = results
+    legacy = new[~new.scope.str.startswith("stimulus_condition:")]
+    pd.testing.assert_frame_equal(old.reset_index(drop=True), legacy.reset_index(drop=True))
+    joint = new[new.scope.str.startswith("stimulus_condition:")]
+    assert set(joint.scope) == {
+        f"stimulus_condition:{s}|{c}"
+        for s in ("chirp", "movingbar") for c in ("c1", "d")
+    }
+    for uid, rows in new.groupby("unit_id"):
+        children = joint[joint.unit_id == uid]
+        for kind, position in [("stimulus", 0), ("condition", 1)]:
+            for row in rows[rows.scope.str.startswith(kind + ":")].itertuples():
+                label = row.scope.split(":", 1)[1]
+                selected = children[children.scope.map(lambda s: s.split(":", 1)[1].split("|")[position] == label)]
+                assert selected.n_windows.sum() == row.n_windows
+                np.testing.assert_allclose(np.average(np.stack(selected.emb), axis=0, weights=selected.n_windows), row.emb, atol=1e-6)

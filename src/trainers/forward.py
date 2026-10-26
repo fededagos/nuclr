@@ -49,7 +49,7 @@ class ForwardPass(Trainer):
         if self.scoped:
             if self.world_size != 1:
                 raise ValueError("Scoped forward currently requires one process/GPU")
-            unknown = set(self.cfg.scopes) - {"all", "condition", "stimulus"}
+            unknown = set(self.cfg.scopes) - {"all", "condition", "stimulus", "stimulus_condition"}
             if unknown:
                 raise ValueError(f"Unknown scopes: {unknown}")
             self._setup_model(ckpt)
@@ -223,6 +223,10 @@ class ForwardPass(Trainer):
                                 j
                             ]
                             scopes.append(f"{kind}:{label}")
+                    if "stimulus_condition" in self.cfg.scopes:
+                        stimulus = np.asarray(data.blocks.stimulus).astype(str)[j]
+                        condition = np.asarray(data.blocks.condition).astype(str)[j]
+                        scopes.append(f"stimulus_condition:{stimulus}|{condition}")
                     for scope in scopes:
                         accumulators.setdefault(
                             scope,
