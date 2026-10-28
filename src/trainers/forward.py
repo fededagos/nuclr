@@ -53,6 +53,14 @@ class ForwardPass(Trainer):
             if unknown:
                 raise ValueError(f"Unknown scopes: {unknown}")
             self._setup_model(ckpt)
+            option = self.cfg.get("export_window_stimuli")
+            self.window_stimuli = set()
+            if option is not None:
+                if not (OmegaConf.is_list(option) or isinstance(option, (list, tuple))) or not option or not all(isinstance(s, str) and s for s in option):
+                    raise TypeError("export_window_stimuli must be a non-empty string list or null")
+                if self.model.emb_dim != 256:
+                    raise ValueError("Window export requires 256-dimensional embeddings")
+                self.window_stimuli = set(option)
             self.forward_epoch = None if self.init_only else ckpt["epoch"]
             self.model_config = OmegaConf.to_container(
                 self.cfg.model if self.init_only else ckpt["cfg"]["model"], resolve=True
@@ -205,7 +213,17 @@ class ForwardPass(Trainer):
                 ("emb", pa.list_(pa.float32(), self.model.emb_dim)),
             ]
         )
-        with pq.ParquetWriter(temporary, schema) as writer:
+        window_temporary = output / "windows.parquet.tmp"
+        window_schema = pa.schema([
+            ("unit_id", pa.string()), ("recording", pa.string()), ("block", pa.int64()),
+            ("stimulus", pa.string()), ("condition", pa.string()), ("condition_class", pa.string()),
+            ("window", pa.int64()), ("start_s", pa.float64()), ("n_context", pa.int64()),
+            ("emb", pa.list_(pa.float32(), 256)),
+        ]) if self.window_stimuli else None
+        with pq.ParquetWriter(temporary, schema) as writer, (
+            pq.ParquetWriter(window_temporary, window_schema)
+            if self.window_stimuli else nullcontext()
+        ) as window_writer:
             for rec in self.dataset.recording_dict:
                 data = self.dataset._get_data_object(rec)
                 ids = np.asarray(data.units.id).astype(str)
@@ -270,6 +288,21 @@ class ForwardPass(Trainer):
                         for scope in scopes:
                             accumulators[scope][0][positions] += values
                             accumulators[scope][1][positions] += 1
+                        if window_writer is not None:
+                            stimulus = np.asarray(data.blocks.stimulus).astype(str)[j]
+                            if stimulus in self.window_stimuli:
+                                condition = np.asarray(data.blocks.condition).astype(str)[j]
+                                classes = getattr(data.blocks, "condition_class", None)
+                                condition_class = None if classes is None else np.asarray(classes).astype(str)[j]
+                                size = len(view.unit_ids)
+                                window_writer.write_table(pa.Table.from_arrays([
+                                    pa.array(view.unit_ids), pa.array([str(rec)] * size),
+                                    pa.array([j] * size, type=pa.int64()), pa.array([stimulus] * size),
+                                    pa.array([condition] * size), pa.array([condition_class] * size, type=pa.string()),
+                                    pa.array([k] * size, type=pa.int64()), pa.array([index.start] * size, type=pa.float64()),
+                                    pa.array([size] * size, type=pa.int64()),
+                                    pa.FixedSizeListArray.from_arrays(pa.array(values.ravel(), type=pa.float32()), 256),
+                                ], schema=window_schema))
                 for scope, (total, counts) in accumulators.items():
                     observed = counts > 0
                     if not observed.any():
@@ -293,6 +326,8 @@ class ForwardPass(Trainer):
                         )
                     )
         temporary.replace(output / "embeddings.parquet")
+        if self.window_stimuli:
+            window_temporary.replace(output / "windows.parquet")
         metadata = {
             "ckpt": (
                 None if self.init_only else str(Path(self.cfg.ckpt.load_from).resolve())

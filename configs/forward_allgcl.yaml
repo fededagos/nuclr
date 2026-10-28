@@ -6,6 +6,7 @@ defaults:
 splits: [train, valid, test]
 scopes: [all, condition, stimulus]
 init_only: false
+export_window_stimuli: null
 resume: false
 batch_size: 1
 ckpt:
